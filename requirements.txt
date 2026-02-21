@@ -1,1 +1,2 @@
 python-binance==1.0.19
+psycopg2-binary==2.9.9
