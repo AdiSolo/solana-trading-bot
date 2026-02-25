@@ -1,5 +1,5 @@
 """
-Binance Testnet Grid Trading Bot — SOLUSDT (~50$)
+Binance Testnet Grid Trading Bot — SOLUSDC (~50$)
 ==================================================
 - Plasează ordine de cumpărare și vânzare la intervale fixe (grid)
 - VINDE DOAR dacă prețul de vânzare > prețul de cumpărare (profit garantat)
@@ -31,7 +31,7 @@ if not API_KEY or not API_SECRET:
 if not DATABASE_URL:
     raise ValueError("❌ Lipsește variabila DATABASE_URL!")
 
-SYMBOL         = "SOLUSDT"
+SYMBOL         = "SOLUSDC"
 LOWER_PRICE    = 70.0
 UPPER_PRICE    = 100.0
 GRID_LEVELS    = 5
@@ -82,7 +82,7 @@ def db_init():
                     level       INTEGER,
                     price       NUMERIC,
                     quantity    NUMERIC,
-                    profit_usdt NUMERIC DEFAULT 0,
+                    profit_usdc NUMERIC DEFAULT 0,
                     profit_pct  NUMERIC DEFAULT 0,
                     order_id    TEXT
                 );
@@ -125,16 +125,16 @@ def db_delete_position(level):
         conn.commit()
     log.info(f"🗑️  [DB] Poziție ștearsă → Nivel {level}")
 
-def db_save_trade(trade_type, level, price, quantity, profit_usdt=0, profit_pct=0, order_id=""):
+def db_save_trade(trade_type, level, price, quantity, profit_usdc=0, profit_pct=0, order_id=""):
     """Salvează o tranzacție în istoricul din baza de date."""
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO trades (type, symbol, level, price, quantity, profit_usdt, profit_pct, order_id)
+                INSERT INTO trades (type, symbol, level, price, quantity, profit_usdc, profit_pct, order_id)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-            """, (trade_type, SYMBOL, level, price, quantity, profit_usdt, profit_pct, order_id))
+            """, (trade_type, SYMBOL, level, price, quantity, profit_usdc, profit_pct, order_id))
         conn.commit()
-    log.info(f"💾 [DB] Tranzacție salvată → {trade_type} | Nivel {level} | {price}$ | Profit: {profit_usdt:.4f} USDT")
+    log.info(f"💾 [DB] Tranzacție salvată → {trade_type} | Nivel {level} | {price}$ | Profit: {profit_usdc:.4f} USDC")
 
 # ─────────────────────────────────────────────
 #  BINANCE
@@ -199,7 +199,7 @@ class GridBot:
         step          = (UPPER_PRICE - LOWER_PRICE) / GRID_LEVELS
         total_capital = ORDER_AMOUNT * LOWER_PRICE * GRID_LEVELS
         log.info(f"💎 Simbol: {SYMBOL} | Capital estimat: ~{total_capital:.1f}$ | Interval grid: {step:.1f}$ per nivel")
-        log.info(f"📊 Grid: {GRID_LEVELS} nivele între {LOWER_PRICE} - {UPPER_PRICE} USDT")
+        log.info(f"📊 Grid: {GRID_LEVELS} nivele între {LOWER_PRICE} - {UPPER_PRICE} USDC")
         log.info(f"📏 Nivele: {[round_price(p, self.price_dec) for p in self.grid_prices]}")
 
     def get_grid_level(self, price):
@@ -235,7 +235,7 @@ class GridBot:
             log.warning(
                 f"🚫 SELL BLOCAT (PIERDERE) | Nivel {level_index} | "
                 f"Vânzare: {sell_price}$ ≤ Cumpărare: {buy_price}$ | "
-                f"Pierdere evitată: -{pierdere:.4f} USDT | Poziție menținută în Supabase."
+                f"Pierdere evitată: -{pierdere:.4f} USDC | Poziție menținută în Supabase."
             )
             return None
 
@@ -252,22 +252,22 @@ class GridBot:
         # ── Plasăm ordinul ────────────────────────────────────────────────
         qty          = round_qty(ORDER_AMOUNT, self.qty_dec)
         sell_price_r = round_price(sell_price, self.price_dec)
-        profit_usdt  = (sell_price_r - buy_price) * qty
+        profit_usdc  = (sell_price_r - buy_price) * qty
 
         try:
             order = self.client.create_order(
                 symbol=SYMBOL, side="SELL", type="LIMIT",
                 timeInForce="GTC", quantity=qty, price=str(sell_price_r)
             )
-            self.profit_total += profit_usdt
+            self.profit_total += profit_usdc
             self.trades_sell  += 1
             # Actualizează Supabase
             db_delete_position(level_index)
-            db_save_trade("SELL", level_index, sell_price_r, qty, profit_usdt, profit_pct, str(order["orderId"]))
+            db_save_trade("SELL", level_index, sell_price_r, qty, profit_usdc, profit_pct, str(order["orderId"]))
             del self.positions[level_index]
             log.info(
                 f"🔴 SELL | Nivel {level_index} | Vânzare: {sell_price_r}$ | "
-                f"Cumpărare: {buy_price}$ | Profit: +{profit_usdt:.4f} USDT (+{profit_pct:.2f}%) | "
+                f"Cumpărare: {buy_price}$ | Profit: +{profit_usdc:.4f} USDC (+{profit_pct:.2f}%) | "
                 f"ID: {order['orderId']}"
             )
             return order
@@ -278,16 +278,16 @@ class GridBot:
     def get_balance(self):
         try:
             account = self.client.get_account()
-            usdt = next((float(b["free"]) for b in account["balances"] if b["asset"] == "USDT"), 0.0)
+            USDC = next((float(b["free"]) for b in account["balances"] if b["asset"] == "USDC"), 0.0)
             sol  = next((float(b["free"]) for b in account["balances"] if b["asset"] == "SOL"),  0.0)
-            return usdt, sol
+            return USDC, sol
         except Exception:
             return 0.0, 0.0
 
     def print_dashboard(self, current_price):
-        usdt, sol   = self.get_balance()
+        USDC, sol   = self.get_balance()
         sol_value   = sol * current_price
-        total_value = usdt + sol_value
+        total_value = USDC + sol_value
         uptime      = datetime.now() - self.start_time
         hours, rem  = divmod(int(uptime.total_seconds()), 3600)
         minutes     = rem // 60
@@ -304,13 +304,13 @@ class GridBot:
         print("═" * 62)
         print(f"  📊  GRID BOT DASHBOARD  —  {datetime.now().strftime('%H:%M:%S')}")
         print("═" * 62)
-        print(f"  💹  SOL preț curent   : {current_price:.2f} USDT  {price_change}")
+        print(f"  💹  SOL preț curent   : {current_price:.2f} USDC  {price_change}")
         print("─" * 62)
-        print(f"  💵  Sold USDT liber   : {usdt:.2f} $")
+        print(f"  💵  Sold USDC liber   : {USDC:.2f} $")
         print(f"  🪙  Sold SOL liber    : {sol:.4f} SOL  (≈ {sol_value:.2f} $)")
         print(f"  💰  Valoare totală    : {total_value:.2f} $")
         print("─" * 62)
-        print(f"  ✅  Profit realizat   : +{self.profit_total:.4f} USDT")
+        print(f"  ✅  Profit realizat   : +{self.profit_total:.4f} USDC")
         print(f"  🟢  Cumpărări         : {self.trades_buy}")
         print(f"  🔴  Vânzări reușite   : {self.trades_sell}")
         print(f"  🚫  Vânzări blocate   : {self.sells_blocked}  (pierdere evitată)")
