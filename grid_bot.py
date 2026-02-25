@@ -141,9 +141,14 @@ def db_save_trade(trade_type, level, price, quantity, profit_usdt=0, profit_pct=
 # ─────────────────────────────────────────────
 
 def create_client():
-    client = Client(API_KEY, API_SECRET, testnet=True)
-    client.API_URL = "https://testnet.binance.vision/api"
-    log.info("✅ Conectat la Binance Testnet")
+    LIVE = os.environ.get("LIVE_TRADING", "false").lower() == "true"
+    if LIVE:
+        client = Client(API_KEY, API_SECRET)
+        log.info("✅ Conectat la Binance REAL 💰")
+    else:
+        client = Client(API_KEY, API_SECRET, testnet=True)
+        client.API_URL = "https://testnet.binance.vision/api"
+        log.info("✅ Conectat la Binance Testnet")
     return client
 
 def get_current_price(client, symbol):
