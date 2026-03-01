@@ -356,9 +356,11 @@ class GridBot:
             account = self.client.get_account()
             usdc = next((float(b["free"]) for b in account["balances"] if b["asset"] == "USDC"), 0.0)
             sol  = next((float(b["free"]) for b in account["balances"] if b["asset"] == "SOL"),  0.0)
+            self._last_usdc = usdc
+            self._last_sol  = sol
             return usdc, sol
         except Exception:
-            return 0.0, 0.0
+            return getattr(self, '_last_usdc', 0.0), getattr(self, '_last_sol', 0.0)
 
     def print_dashboard(self, current_price):
         usdc, sol   = self.get_balance()
@@ -419,8 +421,8 @@ class GridBot:
                 if check_counter % 40 == 0 and self.pending_orders:
                     self.check_pending_orders()
 
-                # Dashboard la fiecare 30 minute (60 × 30s)
-                if check_counter % 60 == 0:
+                # Dashboard la fiecare 60 minute (120 × 30s)
+                if check_counter % 120 == 0:
                     self.print_dashboard(current_price)
 
                 if current_level is None:
@@ -450,7 +452,11 @@ class GridBot:
 
             except BinanceAPIException as e:
                 log.error(f"❌ Eroare API Binance: {e}")
-                time.sleep(30)
+                if "-1003" in str(e):
+                    log.warning("⏳ Rate limit / Ban detectat — aștept 5 minute...")
+                    time.sleep(300)
+                else:
+                    time.sleep(30)
             except KeyboardInterrupt:
                 log.info("🛑 Bot oprit de utilizator.")
                 self.print_dashboard(get_current_price(self.client, SYMBOL))
