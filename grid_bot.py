@@ -415,12 +415,12 @@ class GridBot:
 
                 check_counter += 1
 
-                # Verifică ordinele pending la fiecare 5 minute (10 × 30s)
-                if check_counter % 10 == 0 and self.pending_orders:
+                # Verifică ordinele pending la fiecare 20 minute (40 × 30s)
+                if check_counter % 40 == 0 and self.pending_orders:
                     self.check_pending_orders()
 
-                # Dashboard la fiecare 10 minute (20 × 30s)
-                if check_counter % 20 == 0:
+                # Dashboard la fiecare 30 minute (60 × 30s)
+                if check_counter % 60 == 0:
                     self.print_dashboard(current_price)
 
                 if current_level is None:
