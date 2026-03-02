@@ -200,9 +200,6 @@ class GridBot:
         self.grid_prices = calculate_grid_levels(LOWER_PRICE, UPPER_PRICE, GRID_LEVELS)
 
         self.positions, self.pending_orders = db_load_positions()
-        # order_id → level (pentru lookup rapid în User Data Stream)
-        self.order_id_to_level = {v: k for k, v in self.pending_orders.items()}
-
         self.current_price = None
         self.price_lock    = threading.Lock()
 
@@ -213,6 +210,7 @@ class GridBot:
         self.start_time    = datetime.now()
         self.start_price   = None
         self.prev_level    = None
+        self.last_pending_check    = time.time()
         self.last_dashboard_check = time.time()
 
         step = (UPPER_PRICE - LOWER_PRICE) / GRID_LEVELS
@@ -225,25 +223,24 @@ class GridBot:
                 return i
         return None
 
-    def on_order_update(self, order_id_str, status, exec_price):
-        """Apelat când un ordin se execută — via User Data Stream."""
-        level = self.order_id_to_level.get(order_id_str)
-        if level is None:
-            return  # ordin necunoscut (poate SELL)
-
-        if status == "FILLED":
-            log.info(f"✅ [WS] BUY {order_id_str} @ Nivel {level} — FILLED instantan!")
-            db_confirm_position(level)
-            del self.pending_orders[level]
-            del self.order_id_to_level[order_id_str]
-
-        elif status in ["CANCELED", "EXPIRED", "REJECTED"]:
-            log.warning(f"❌ [WS] BUY {order_id_str} @ Nivel {level} — {status}, șterg")
-            db_delete_position(level)
-            del self.pending_orders[level]
-            del self.order_id_to_level[order_id_str]
-            if level in self.positions:
-                del self.positions[level]
+    def check_pending_orders(self):
+        """Verifică ordinele pending via REST — fallback fără User Data Stream."""
+        for level, order_id in list(self.pending_orders.items()):
+            try:
+                order = self.client.get_order(symbol=SYMBOL, orderId=int(order_id))
+                status = order["status"]
+                if status == "FILLED":
+                    log.info(f"✅ BUY {order_id} @ Nivel {level} — FILLED!")
+                    db_confirm_position(level)
+                    del self.pending_orders[level]
+                elif status in ["CANCELED", "REJECTED", "EXPIRED"]:
+                    log.warning(f"❌ BUY {order_id} @ Nivel {level} — {status}, șterg")
+                    db_delete_position(level)
+                    del self.pending_orders[level]
+                    if level in self.positions:
+                        del self.positions[level]
+            except Exception as e:
+                log.error(f"❌ Eroare verificare ordin {order_id}: {e}")
 
     def place_buy_order(self, price, level_index):
         qty     = round_qty(ORDER_AMOUNT, self.qty_dec)
@@ -254,7 +251,6 @@ class GridBot:
             order_id = str(order["orderId"])
             self.positions[level_index]      = price_r
             self.pending_orders[level_index] = order_id
-            self.order_id_to_level[order_id] = level_index
             self.trades_buy += 1
             db_save_position(level_index, price_r, order_id, status="pending")
             db_save_trade("BUY", level_index, price_r, qty, order_id=order_id)
@@ -349,6 +345,12 @@ class GridBot:
             self.start_price = current_price
 
         now = time.time()
+
+        # Verificare pending la fiecare 10 minute
+        if now - self.last_pending_check >= 600 and self.pending_orders:
+            self.check_pending_orders()
+            self.last_pending_check = now
+
         if now - self.last_dashboard_check >= 3600:
             self.print_dashboard(current_price)
             self.last_dashboard_check = now
@@ -406,82 +408,9 @@ class GridBot:
 
         threading.Thread(target=run_ws, daemon=True).start()
 
-    def start_user_data_websocket(self):
-        """WebSocket 2: User Data Stream — confirmări ordine instantane."""
-        import requests
-        try:
-            # Binance Spot User Data Stream — endpoint corect 2024+
-            headers = {"X-MBX-APIKEY": API_KEY}
-            resp = requests.post("https://api.binance.com/api/v3/userDataStream",
-                                  headers=headers, timeout=10)
-            if resp.status_code == 410:
-                # Fallback la v1
-                resp = requests.post("https://api.binance.com/api/v1/userDataStream",
-                                      headers=headers, timeout=10)
-            resp.raise_for_status()
-            listen_key = resp.json()["listenKey"]
-            log.info(f"🔑 ListenKey obținut: {listen_key[:10]}...")
-        except Exception as e:
-            log.error(f"❌ Nu pot obține listenKey: {e}")
-            log.warning("⚠️ User Data Stream indisponibil — continuăm fără confirmare instantă")
-            return
-
-        WS_URL = f"wss://stream.binance.com:9443/ws/{listen_key}"
-
-        def on_message(ws, message):
-            try:
-                data = json.loads(message)
-                if data.get("e") == "executionReport":
-                    order_id = str(data["i"])
-                    status   = data["X"]  # order status
-                    exec_price = float(data.get("L", 0))  # last executed price
-                    log.info(f"📨 [WS] Order update: ID={order_id} Status={status}")
-                    self.on_order_update(order_id, status, exec_price)
-            except Exception as e:
-                log.error(f"❌ User Data WS eroare: {e}")
-
-        def on_open(ws):
-            log.info("📡 User Data WebSocket conectat — confirmări ordine instantane!")
-
-        def on_error(ws, error):
-            log.error(f"❌ User Data WS error: {error}")
-
-        def on_close(ws, *args):
-            log.warning("⚠️ User Data WS închis — reconectez în 5s...")
-
-        def keepalive():
-            """Reînnoiește listenKey la fiecare 30 minute."""
-            import requests
-            while True:
-                time.sleep(1800)
-                try:
-                    headers = {"X-MBX-APIKEY": API_KEY}
-                    r = requests.put(f"https://api.binance.com/api/v3/userDataStream",
-                                      headers=headers, params={"listenKey": listen_key}, timeout=10)
-                    if r.status_code == 410:
-                        requests.put(f"https://api.binance.com/api/v1/userDataStream",
-                                      headers=headers, params={"listenKey": listen_key}, timeout=10)
-                    log.info("🔄 ListenKey reînnoit automat")
-                except Exception as e:
-                    log.error(f"❌ Eroare reînnoire listenKey: {e}")
-
-        def run_ws():
-            while True:
-                try:
-                    ws = websocket.WebSocketApp(WS_URL, on_message=on_message,
-                                                 on_open=on_open, on_error=on_error, on_close=on_close)
-                    ws.run_forever(ping_interval=30, ping_timeout=10)
-                except Exception as e:
-                    log.error(f"❌ User Data WS crash: {e}")
-                time.sleep(5)
-
-        threading.Thread(target=run_ws, daemon=True).start()
-        threading.Thread(target=keepalive, daemon=True).start()
-
     def run(self):
         log.info("🚀 Botul a pornit cu WebSocket!")
         self.start_price_websocket()
-        self.start_user_data_websocket()
 
         log.info("⏳ Aștept primul preț de la WebSocket...")
         while self.current_price is None:
