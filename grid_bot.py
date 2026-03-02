@@ -408,8 +408,15 @@ class GridBot:
 
     def start_user_data_websocket(self):
         """WebSocket 2: User Data Stream — confirmări ordine instantane."""
+        import requests
+        import hmac
+        import hashlib
         try:
-            listen_key = self.client.stream_get_listen_key()
+            # Apel direct REST — python-binance 1.0.19 are URL vechi (410 Gone)
+            headers = {"X-MBX-APIKEY": API_KEY}
+            resp = requests.post("https://api.binance.com/api/v3/userDataStream", headers=headers)
+            resp.raise_for_status()
+            listen_key = resp.json()["listenKey"]
             log.info(f"🔑 ListenKey obținut: {listen_key[:10]}...")
         except Exception as e:
             log.error(f"❌ Nu pot obține listenKey: {e}")
@@ -440,10 +447,12 @@ class GridBot:
 
         def keepalive():
             """Reînnoiește listenKey la fiecare 30 minute."""
+            import requests
             while True:
                 time.sleep(1800)
                 try:
-                    self.client.stream_keepalive(listen_key)
+                    headers = {"X-MBX-APIKEY": API_KEY}
+                    requests.put(f"https://api.binance.com/api/v3/userDataStream?listenKey={listen_key}", headers=headers)
                     log.info("🔄 ListenKey reînnoit automat")
                 except Exception as e:
                     log.error(f"❌ Eroare reînnoire listenKey: {e}")
