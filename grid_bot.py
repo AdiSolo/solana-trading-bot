@@ -1,11 +1,11 @@
 """
 Binance Grid Trading Bot — SOLUSDC
 ==================================================
-- Folosește WebSocket pentru prețul curent (zero API weight!)
-- Plasează ordine LIMIT la prețurile gridului
-- SELL permis DOAR dacă BUY e confirmat "filled" în baza de date
-- VINDE DOAR dacă prețul de vânzare > prețul de cumpărare
-- Pozițiile sunt salvate în Supabase — supraviețuiesc repornirilor!
+- WebSocket pentru preț (zero API weight!)
+- WebSocket User Data Stream pentru statusul ordinelor (instantan!)
+- ListenKey reînnoit automat la 30 minute
+- SELL permis DOAR dacă BUY e confirmat filled
+- Pozițiile sunt salvate în Supabase
 """
 
 import time
@@ -35,13 +35,13 @@ if not DATABASE_URL:
     raise ValueError("❌ Lipsește variabila DATABASE_URL!")
 
 SYMBOL         = "SOLUSDC"
-SYMBOL_WS      = SYMBOL.lower()  # websocket folosește lowercase
+SYMBOL_WS      = SYMBOL.lower()
 LOWER_PRICE    = 70.0
 UPPER_PRICE    = 100.0
 GRID_LEVELS    = 10
 ORDER_AMOUNT   = 0.1
 MIN_PROFIT_PCT = 0.2
-CHECK_INTERVAL = 5   # verificare logică la fiecare 5s (prețul vine din WebSocket, nu API!)
+CHECK_INTERVAL = 5
 
 # ─────────────────────────────────────────────
 #  LOGGING
@@ -183,19 +183,6 @@ def get_symbol_info(client, symbol):
     qty_decimals   = int(round(-math.log10(float(lot_filter["stepSize"]))))
     return price_decimals, qty_decimals
 
-def check_order_status(client, order_id):
-    try:
-        order = client.get_order(symbol=SYMBOL, orderId=int(order_id))
-        status = order["status"]
-        if status == "FILLED":
-            return "filled"
-        elif status in ["CANCELED", "REJECTED", "EXPIRED"]:
-            return "canceled"
-        return "pending"
-    except Exception as e:
-        log.error(f"❌ Eroare verificare ordin {order_id}: {e}")
-        return "pending"
-
 def round_price(price, decimals): return round(price, decimals)
 def round_qty(qty, decimals):     return round(qty, decimals)
 def calculate_grid_levels(lower, upper, levels):
@@ -213,8 +200,10 @@ class GridBot:
         self.grid_prices = calculate_grid_levels(LOWER_PRICE, UPPER_PRICE, GRID_LEVELS)
 
         self.positions, self.pending_orders = db_load_positions()
+        # order_id → level (pentru lookup rapid în User Data Stream)
+        self.order_id_to_level = {v: k for k, v in self.pending_orders.items()}
 
-        self.current_price = None   # actualizat de WebSocket
+        self.current_price = None
         self.price_lock    = threading.Lock()
 
         self.profit_total  = 0.0
@@ -224,7 +213,6 @@ class GridBot:
         self.start_time    = datetime.now()
         self.start_price   = None
         self.prev_level    = None
-        self.last_pending_check   = time.time()
         self.last_dashboard_check = time.time()
 
         step = (UPPER_PRICE - LOWER_PRICE) / GRID_LEVELS
@@ -237,31 +225,25 @@ class GridBot:
                 return i
         return None
 
-    def on_price_update(self, msg):
-        """Callback WebSocket — prețul vine gratuit, fără API weight!"""
-        if msg.get("e") == "error":
-            log.error(f"❌ WebSocket eroare: {msg}")
-            return
-        try:
-            price = float(msg["c"])  # "c" = close price (prețul curent)
-            with self.price_lock:
-                self.current_price = price
-        except Exception as e:
-            log.error(f"❌ Eroare procesare WebSocket: {e}")
+    def on_order_update(self, order_id_str, status, exec_price):
+        """Apelat când un ordin se execută — via User Data Stream."""
+        level = self.order_id_to_level.get(order_id_str)
+        if level is None:
+            return  # ordin necunoscut (poate SELL)
 
-    def check_pending_orders(self):
-        for level, order_id in list(self.pending_orders.items()):
-            status = check_order_status(self.client, order_id)
-            if status == "filled":
-                log.info(f"✅ BUY {order_id} @ Nivel {level} — FILLED!")
-                db_confirm_position(level)
-                del self.pending_orders[level]
-            elif status == "canceled":
-                log.warning(f"❌ BUY {order_id} @ Nivel {level} — CANCELED, șterg")
-                db_delete_position(level)
-                del self.pending_orders[level]
-                if level in self.positions:
-                    del self.positions[level]
+        if status == "FILLED":
+            log.info(f"✅ [WS] BUY {order_id_str} @ Nivel {level} — FILLED instantan!")
+            db_confirm_position(level)
+            del self.pending_orders[level]
+            del self.order_id_to_level[order_id_str]
+
+        elif status in ["CANCELED", "EXPIRED", "REJECTED"]:
+            log.warning(f"❌ [WS] BUY {order_id_str} @ Nivel {level} — {status}, șterg")
+            db_delete_position(level)
+            del self.pending_orders[level]
+            del self.order_id_to_level[order_id_str]
+            if level in self.positions:
+                del self.positions[level]
 
     def place_buy_order(self, price, level_index):
         qty     = round_qty(ORDER_AMOUNT, self.qty_dec)
@@ -272,6 +254,7 @@ class GridBot:
             order_id = str(order["orderId"])
             self.positions[level_index]      = price_r
             self.pending_orders[level_index] = order_id
+            self.order_id_to_level[order_id] = level_index
             self.trades_buy += 1
             db_save_position(level_index, price_r, order_id, status="pending")
             db_save_trade("BUY", level_index, price_r, qty, order_id=order_id)
@@ -360,20 +343,12 @@ class GridBot:
         print("")
 
     def process_price(self, current_price):
-        """Logica principală — apelată la fiecare tick de preț."""
         current_level = self.get_grid_level(current_price)
 
         if self.start_price is None:
             self.start_price = current_price
 
         now = time.time()
-
-        # Verificare pending la fiecare 10 minute
-        if now - self.last_pending_check >= 600 and self.pending_orders:
-            self.check_pending_orders()
-            self.last_pending_check = now
-
-        # Dashboard la fiecare 60 minute
         if now - self.last_dashboard_check >= 3600:
             self.print_dashboard(current_price)
             self.last_dashboard_check = now
@@ -398,51 +373,99 @@ class GridBot:
 
         self.prev_level = current_level
 
-    def start_websocket(self):
-        """Pornește WebSocket într-un thread separat cu reconectare automată."""
+    def start_price_websocket(self):
+        """WebSocket 1: prețul curent — zero API weight."""
         WS_URL = f"wss://stream.binance.com:9443/ws/{SYMBOL_WS}@ticker"
 
         def on_message(ws, message):
             try:
                 data = json.loads(message)
-                price = float(data["c"])
                 with self.price_lock:
-                    self.current_price = price
+                    self.current_price = float(data["c"])
             except Exception as e:
-                log.error(f"❌ Eroare WebSocket message: {e}")
-
-        def on_error(ws, error):
-            log.error(f"❌ WebSocket eroare: {error}")
-
-        def on_close(ws, close_status_code, close_msg):
-            log.warning("⚠️ WebSocket închis — reconectez în 5s...")
+                log.error(f"❌ Price WS eroare: {e}")
 
         def on_open(ws):
-            log.info(f"📡 WebSocket conectat pentru {SYMBOL} — zero API weight!")
+            log.info(f"📡 Price WebSocket conectat — zero API weight!")
+
+        def on_error(ws, error):
+            log.error(f"❌ Price WS error: {error}")
+
+        def on_close(ws, *args):
+            log.warning("⚠️ Price WS închis — reconectez...")
 
         def run_ws():
             while True:
                 try:
-                    ws = websocket.WebSocketApp(
-                        WS_URL,
-                        on_message=on_message,
-                        on_error=on_error,
-                        on_close=on_close,
-                        on_open=on_open
-                    )
+                    ws = websocket.WebSocketApp(WS_URL, on_message=on_message,
+                                                 on_open=on_open, on_error=on_error, on_close=on_close)
                     ws.run_forever(ping_interval=30, ping_timeout=10)
                 except Exception as e:
-                    log.error(f"❌ WebSocket crash: {e}")
+                    log.error(f"❌ Price WS crash: {e}")
                 time.sleep(5)
 
-        t = threading.Thread(target=run_ws, daemon=True)
-        t.start()
+        threading.Thread(target=run_ws, daemon=True).start()
+
+    def start_user_data_websocket(self):
+        """WebSocket 2: User Data Stream — confirmări ordine instantane."""
+        try:
+            listen_key = self.client.stream_get_listen_key()
+            log.info(f"🔑 ListenKey obținut: {listen_key[:10]}...")
+        except Exception as e:
+            log.error(f"❌ Nu pot obține listenKey: {e}")
+            return
+
+        WS_URL = f"wss://stream.binance.com:9443/ws/{listen_key}"
+
+        def on_message(ws, message):
+            try:
+                data = json.loads(message)
+                if data.get("e") == "executionReport":
+                    order_id = str(data["i"])
+                    status   = data["X"]  # order status
+                    exec_price = float(data.get("L", 0))  # last executed price
+                    log.info(f"📨 [WS] Order update: ID={order_id} Status={status}")
+                    self.on_order_update(order_id, status, exec_price)
+            except Exception as e:
+                log.error(f"❌ User Data WS eroare: {e}")
+
+        def on_open(ws):
+            log.info("📡 User Data WebSocket conectat — confirmări ordine instantane!")
+
+        def on_error(ws, error):
+            log.error(f"❌ User Data WS error: {error}")
+
+        def on_close(ws, *args):
+            log.warning("⚠️ User Data WS închis — reconectez în 5s...")
+
+        def keepalive():
+            """Reînnoiește listenKey la fiecare 30 minute."""
+            while True:
+                time.sleep(1800)
+                try:
+                    self.client.stream_keepalive(listen_key)
+                    log.info("🔄 ListenKey reînnoit automat")
+                except Exception as e:
+                    log.error(f"❌ Eroare reînnoire listenKey: {e}")
+
+        def run_ws():
+            while True:
+                try:
+                    ws = websocket.WebSocketApp(WS_URL, on_message=on_message,
+                                                 on_open=on_open, on_error=on_error, on_close=on_close)
+                    ws.run_forever(ping_interval=30, ping_timeout=10)
+                except Exception as e:
+                    log.error(f"❌ User Data WS crash: {e}")
+                time.sleep(5)
+
+        threading.Thread(target=run_ws, daemon=True).start()
+        threading.Thread(target=keepalive, daemon=True).start()
 
     def run(self):
         log.info("🚀 Botul a pornit cu WebSocket!")
-        self.start_websocket()
+        self.start_price_websocket()
+        self.start_user_data_websocket()
 
-        # Așteptăm primul preț de la WebSocket
         log.info("⏳ Aștept primul preț de la WebSocket...")
         while self.current_price is None:
             time.sleep(1)
