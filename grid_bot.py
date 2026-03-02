@@ -409,17 +409,21 @@ class GridBot:
     def start_user_data_websocket(self):
         """WebSocket 2: User Data Stream — confirmări ordine instantane."""
         import requests
-        import hmac
-        import hashlib
         try:
-            # Apel direct REST — python-binance 1.0.19 are URL vechi (410 Gone)
+            # Binance Spot User Data Stream — endpoint corect 2024+
             headers = {"X-MBX-APIKEY": API_KEY}
-            resp = requests.post("https://api.binance.com/api/v3/userDataStream", headers=headers)
+            resp = requests.post("https://api.binance.com/api/v3/userDataStream",
+                                  headers=headers, timeout=10)
+            if resp.status_code == 410:
+                # Fallback la v1
+                resp = requests.post("https://api.binance.com/api/v1/userDataStream",
+                                      headers=headers, timeout=10)
             resp.raise_for_status()
             listen_key = resp.json()["listenKey"]
             log.info(f"🔑 ListenKey obținut: {listen_key[:10]}...")
         except Exception as e:
             log.error(f"❌ Nu pot obține listenKey: {e}")
+            log.warning("⚠️ User Data Stream indisponibil — continuăm fără confirmare instantă")
             return
 
         WS_URL = f"wss://stream.binance.com:9443/ws/{listen_key}"
@@ -452,7 +456,11 @@ class GridBot:
                 time.sleep(1800)
                 try:
                     headers = {"X-MBX-APIKEY": API_KEY}
-                    requests.put(f"https://api.binance.com/api/v3/userDataStream?listenKey={listen_key}", headers=headers)
+                    r = requests.put(f"https://api.binance.com/api/v3/userDataStream",
+                                      headers=headers, params={"listenKey": listen_key}, timeout=10)
+                    if r.status_code == 410:
+                        requests.put(f"https://api.binance.com/api/v1/userDataStream",
+                                      headers=headers, params={"listenKey": listen_key}, timeout=10)
                     log.info("🔄 ListenKey reînnoit automat")
                 except Exception as e:
                     log.error(f"❌ Eroare reînnoire listenKey: {e}")
