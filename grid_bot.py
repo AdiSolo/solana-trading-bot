@@ -37,7 +37,7 @@ UPPER_PRICE    = 100.0
 GRID_LEVELS    = 10
 ORDER_AMOUNT   = 0.1
 MIN_PROFIT_PCT = 0.2
-CHECK_INTERVAL = 30
+CHECK_INTERVAL = 60
 
 # ─────────────────────────────────────────────
 #  LOGGING
@@ -417,12 +417,12 @@ class GridBot:
 
                 check_counter += 1
 
-                # Verifică ordinele pending la fiecare 20 minute (40 × 30s)
-                if check_counter % 40 == 0 and self.pending_orders:
+                # Verifică ordinele pending la fiecare 60 minute (60 × 60s)
+                if check_counter % 60 == 0 and self.pending_orders:
                     self.check_pending_orders()
 
-                # Dashboard la fiecare 60 minute (120 × 30s)
-                if check_counter % 120 == 0:
+                # Dashboard la fiecare 60 minute (60 × 60s)
+                if check_counter % 60 == 0:
                     self.print_dashboard(current_price)
 
                 if current_level is None:
