@@ -11,13 +11,14 @@ Binance Grid Trading Bot — SOLUSDC
 import time
 import os
 import threading
+import json
 from datetime import datetime
 import math
 import logging
 import psycopg2
 import psycopg2.extras
+import websocket
 from binance.client import Client
-from binance.websockets import BinanceSocketManager
 from binance.exceptions import BinanceAPIException
 
 # ─────────────────────────────────────────────
@@ -367,8 +368,8 @@ class GridBot:
 
         now = time.time()
 
-        # Verificare pending la fiecare 60 minute
-        if now - self.last_pending_check >= 3600 and self.pending_orders:
+        # Verificare pending la fiecare 10 minute
+        if now - self.last_pending_check >= 600 and self.pending_orders:
             self.check_pending_orders()
             self.last_pending_check = now
 
@@ -397,12 +398,55 @@ class GridBot:
 
         self.prev_level = current_level
 
+    def start_websocket(self):
+        """Pornește WebSocket într-un thread separat cu reconectare automată."""
+        WS_URL = f"wss://stream.binance.com:9443/ws/{SYMBOL_WS}@ticker"
+
+        def on_message(ws, message):
+            try:
+                data = json.loads(message)
+                price = float(data["c"])
+                with self.price_lock:
+                    self.current_price = price
+            except Exception as e:
+                log.error(f"❌ Eroare WebSocket message: {e}")
+
+        def on_error(ws, error):
+            log.error(f"❌ WebSocket eroare: {error}")
+
+        def on_close(ws, close_status_code, close_msg):
+            log.warning("⚠️ WebSocket închis — reconectez în 5s...")
+
+        def on_open(ws):
+            log.info(f"📡 WebSocket conectat pentru {SYMBOL} — zero API weight!")
+
+        def run_ws():
+            while True:
+                try:
+                    ws = websocket.WebSocketApp(
+                        WS_URL,
+                        on_message=on_message,
+                        on_error=on_error,
+                        on_close=on_close,
+                        on_open=on_open
+                    )
+                    ws.run_forever(ping_interval=30, ping_timeout=10)
+                except Exception as e:
+                    log.error(f"❌ WebSocket crash: {e}")
+                time.sleep(5)
+
+        t = threading.Thread(target=run_ws, daemon=True)
+        t.start()
+
     def run(self):
         log.info("🚀 Botul a pornit cu WebSocket!")
-        bm = BinanceSocketManager(self.client)
-        conn_key = bm.start_symbol_ticker_socket(SYMBOL_WS, self.on_price_update)
-        bm.start()
-        log.info(f"📡 WebSocket activ pentru {SYMBOL} — zero API weight!")
+        self.start_websocket()
+
+        # Așteptăm primul preț de la WebSocket
+        log.info("⏳ Aștept primul preț de la WebSocket...")
+        while self.current_price is None:
+            time.sleep(1)
+        log.info(f"✅ Primul preț primit: {self.current_price}$")
 
         last_processed_price = None
 
@@ -421,14 +465,12 @@ class GridBot:
                             log.warning("⏳ Rate limit detectat — aștept 5 minute...")
                             time.sleep(300)
                     except Exception as e:
-                        log.error(f"❌ Eroare: {e}")
+                        log.error(f"❌ Eroare neașteptată: {e}")
 
                 time.sleep(CHECK_INTERVAL)
 
         except KeyboardInterrupt:
             log.info("🛑 Bot oprit de utilizator.")
-            bm.stop_socket(conn_key)
-            bm.close()
 
 # ─────────────────────────────────────────────
 #  PORNIRE
