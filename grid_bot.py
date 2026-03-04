@@ -39,8 +39,21 @@ SYMBOL_WS      = SYMBOL.lower()
 LOWER_PRICE    = 70.0
 UPPER_PRICE    = 100.0
 GRID_LEVELS    = 10
-ORDER_AMOUNT   = 0.1
 MIN_PROFIT_PCT = 0.2
+
+# Scaling: cumpărăm mai mult când prețul e mai jos
+# Cheia = nivel grid, Valoarea = cantitate SOL
+# Nivelele mai înalte (preț mare) = cantitate mică
+# Nivelele mai joase (preț mic)   = cantitate mare
+def get_order_amount(level_index, grid_levels):
+    """Returnează cantitatea pentru un nivel — scaling invers față de preț."""
+    # nivel 0 (cel mai jos) → cantitate maximă
+    # nivel N (cel mai sus) → cantitate minimă
+    min_qty  = 0.1
+    max_qty  = 0.5
+    step_qty = (max_qty - min_qty) / max(grid_levels - 1, 1)
+    qty = max_qty - level_index * step_qty
+    return round(max(qty, min_qty), 1)
 CHECK_INTERVAL = 5
 
 # ─────────────────────────────────────────────
@@ -99,22 +112,24 @@ def db_init():
 def db_load_positions():
     with get_db() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT level, buy_price, status, order_id FROM positions WHERE symbol = %s", (SYMBOL,))
+            cur.execute("SELECT level, buy_price, quantity, status, order_id FROM positions WHERE symbol = %s", (SYMBOL,))
             rows = cur.fetchall()
-    positions = {}
-    pending   = {}
+    positions   = {}
+    pending     = {}
+    quantities  = {}
     for row in rows:
         level = row["level"]
-        positions[level] = float(row["buy_price"])
+        positions[level]  = float(row["buy_price"])
+        quantities[level] = float(row["quantity"] or 0.1)
         if row["status"] == "pending":
             pending[level] = row["order_id"]
     if positions:
         log.info(f"📂 Poziții filled: {[k for k in positions if k not in pending]} | Poziții pending: {list(pending.keys())}")
     else:
         log.info("📂 Nicio poziție salvată anterior — start curat")
-    return positions, pending
+    return positions, pending, quantities
 
-def db_save_position(level, buy_price, order_id, status="pending"):
+def db_save_position(level, buy_price, order_id, quantity, status="pending"):
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute("""
@@ -123,9 +138,9 @@ def db_save_position(level, buy_price, order_id, status="pending"):
                 ON CONFLICT (level) DO UPDATE
                 SET buy_price = EXCLUDED.buy_price, status = EXCLUDED.status,
                     order_id = EXCLUDED.order_id, updated_at = NOW()
-            """, (level, buy_price, SYMBOL, ORDER_AMOUNT, status, order_id))
+            """, (level, buy_price, SYMBOL, quantity, status, order_id))
         conn.commit()
-    log.info(f"💾 [DB] Poziție salvată → Nivel {level} @ {buy_price}$ | Status: {status}")
+    log.info(f"💾 [DB] Poziție salvată → Nivel {level} @ {buy_price}$ | Qty: {quantity} | Status: {status}")
 
 def db_confirm_position(level):
     with get_db() as conn:
@@ -200,7 +215,7 @@ class GridBot:
         self.price_dec, self.qty_dec = get_symbol_info(client, SYMBOL)
         self.grid_prices = calculate_grid_levels(LOWER_PRICE, UPPER_PRICE, GRID_LEVELS)
 
-        self.positions, self.pending_orders = db_load_positions()
+        self.positions, self.pending_orders, self.position_quantities = db_load_positions()
         self.current_price = None
         self.price_lock    = threading.Lock()
 
@@ -245,16 +260,17 @@ class GridBot:
                 log.error(f"❌ Eroare verificare ordin {order_id}: {e}")
 
     def place_buy_order(self, price, level_index):
-        qty     = round_qty(ORDER_AMOUNT, self.qty_dec)
+        qty     = round_qty(get_order_amount(level_index, GRID_LEVELS), self.qty_dec)
         price_r = round_price(price, self.price_dec)
         try:
             order    = self.client.create_order(symbol=SYMBOL, side="BUY", type="LIMIT",
                                                  timeInForce="GTC", quantity=qty, price=str(price_r))
             order_id = str(order["orderId"])
-            self.positions[level_index]      = price_r
-            self.pending_orders[level_index] = order_id
+            self.positions[level_index]           = price_r
+            self.pending_orders[level_index]      = order_id
+            self.position_quantities[level_index] = qty
             self.trades_buy += 1
-            db_save_position(level_index, price_r, order_id, status="pending")
+            db_save_position(level_index, price_r, order_id, qty, status="pending")
             db_save_trade("BUY", level_index, price_r, qty, order_id=order_id)
             log.info(f"🟢 BUY LIMIT | Nivel {level_index} | {price_r}$ | ID: {order_id} ⏳")
             return order
@@ -276,7 +292,8 @@ class GridBot:
             self.sells_blocked += 1
             log.warning(f"⛔ SELL BLOCAT (PROFIT MIC) | {profit_pct:.2f}% < {MIN_PROFIT_PCT}%")
             return None
-        qty          = round_qty(ORDER_AMOUNT, self.qty_dec)
+        # Citește cantitatea originală din DB
+        qty          = round_qty(self.position_quantities.get(level_index, 0.1), self.qty_dec)
         sell_price_r = round_price(sell_price, self.price_dec)
         profit_usdc  = (sell_price_r - buy_price) * qty
         try:
@@ -288,6 +305,8 @@ class GridBot:
             db_delete_position(level_index)
             db_save_trade("SELL", level_index, sell_price_r, qty, profit_usdc, profit_pct, order_id)
             del self.positions[level_index]
+            if level_index in self.position_quantities:
+                del self.position_quantities[level_index]
             log.info(f"🔴 SELL LIMIT | Nivel {level_index} | {sell_price_r}$ | Profit: +{profit_usdc:.4f} USDC | ID: {order_id}")
             return order
         except BinanceAPIException as e:
