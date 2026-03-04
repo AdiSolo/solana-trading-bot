@@ -224,8 +224,9 @@ class GridBot:
         return None
 
     def check_pending_orders(self):
-        """Verifică ordinele pending via REST — fallback fără User Data Stream."""
+        """Verifică ordinele pending via REST — cu delay între ordine."""
         for level, order_id in list(self.pending_orders.items()):
+            time.sleep(2)  # delay între ordine — evităm ban
             try:
                 order = self.client.get_order(symbol=SYMBOL, orderId=int(order_id))
                 status = order["status"]
