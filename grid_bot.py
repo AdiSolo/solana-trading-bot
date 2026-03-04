@@ -242,7 +242,7 @@ class GridBot:
     def check_pending_orders(self):
         """Verifică ordinele pending via REST — cu delay între ordine."""
         for level, order_id in list(self.pending_orders.items()):
-            time.sleep(2)  # delay între ordine — evităm ban
+            time.sleep(60)  # 1 minut între ordine — safe față de rate limit
             try:
                 order = self.client.get_order(symbol=SYMBOL, orderId=int(order_id))
                 status = order["status"]
@@ -367,8 +367,8 @@ class GridBot:
 
         now = time.time()
 
-        # Verificare pending la fiecare 10 minute
-        if now - self.last_pending_check >= 600 and self.pending_orders:
+        # Verificare pending la fiecare 20 minute
+        if now - self.last_pending_check >= 1200 and self.pending_orders:
             self.check_pending_orders()
             self.last_pending_check = now
 
