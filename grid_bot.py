@@ -158,7 +158,8 @@ def db_save_trade(trade_type, level, price, quantity, profit_usdc=0, profit_pct=
 def create_client():
     LIVE = os.environ.get("LIVE_TRADING", "false").lower() == "true"
     if LIVE:
-        client = Client(API_KEY, API_SECRET)
+        # requests_params evită ping automat la init (reduce weight la pornire)
+        client = Client(API_KEY, API_SECRET, {"verify": True, "timeout": 20})
         log.info("✅ Conectat la Binance REAL 💰")
     else:
         client = Client(API_KEY, API_SECRET, testnet=True)
@@ -448,7 +449,16 @@ class GridBot:
 
 if __name__ == "__main__":
     db_init()
-    client = create_client()
+    while True:
+        try:
+            client = create_client()
+            break
+        except BinanceAPIException as e:
+            if "-1003" in str(e):
+                log.warning("⏳ IP banat la pornire — aștept 5 minute înainte de retry...")
+                time.sleep(300)
+            else:
+                raise
     test_trading_permission(client)
     bot = GridBot(client)
     bot.run()
