@@ -383,12 +383,26 @@ class GridBot:
 
         log.info(f"💰 Preț: {current_price} | Nivel: {current_level} | Filled: {len(self.positions) - len(self.pending_orders)} | Pending: {len(self.pending_orders)}")
 
-        if self.prev_level is not None and current_level < self.prev_level:
+        # La primul tick după pornire, doar setăm nivelul de referință
+        # fără să plasăm ordine — evităm semnale false la restart
+        if self.prev_level is None:
+            log.info(f"📍 Nivel inițial setat: {current_level} — fără ordine la primul tick")
+            self.prev_level = current_level
+            return
+
+        # Salt mare de nivel = gap de preț — ignorăm pentru a evita ordine greșite
+        level_diff = abs(current_level - self.prev_level)
+        if level_diff > 1:
+            log.warning(f"⚠️  Salt nivel: {self.prev_level} → {current_level} (diff={level_diff}) — ignorat")
+            self.prev_level = current_level
+            return
+
+        if current_level < self.prev_level:
             buy_price = self.grid_prices[current_level]
             if current_level not in self.positions:
                 self.place_buy_order(buy_price, current_level)
 
-        elif self.prev_level is not None and current_level > self.prev_level:
+        elif current_level > self.prev_level:
             sell_price = self.grid_prices[current_level]
             if self.prev_level in self.positions:
                 buy_price = self.positions[self.prev_level]
