@@ -278,6 +278,20 @@ class GridBot:
             log.error(f"❌ Eroare BUY: {e}")
             return None
 
+    def get_rebuy_level(self, sold_level):
+        """După un SELL, calculează nivelul pentru noul BUY.
+        Nivel 6+  → 2 nivele mai jos (zonă de risc mai mare)
+        Nivel 5-  → 1 nivel mai jos  (zonă de risc mai mic)
+        """
+        if sold_level >= 6:
+            offset = 2
+        else:
+            offset = 1
+        rebuy_level = sold_level - offset
+        if rebuy_level < 0:
+            rebuy_level = 0
+        return rebuy_level
+
     def place_sell_order(self, sell_price, buy_price, level_index):
         if level_index in self.pending_orders:
             log.warning(f"⏳ SELL BLOCAT | Nivel {level_index} | BUY nu e confirmat încă!")
@@ -308,6 +322,16 @@ class GridBot:
             if level_index in self.position_quantities:
                 del self.position_quantities[level_index]
             log.info(f"🔴 SELL LIMIT | Nivel {level_index} | {sell_price_r}$ | Profit: +{profit_usdc:.4f} USDC | ID: {order_id}")
+
+            # Plasează BUY la nivel mai jos (strategie graduală)
+            rebuy_level = self.get_rebuy_level(level_index)
+            rebuy_price = self.grid_prices[rebuy_level]
+            if rebuy_level not in self.positions:
+                log.info(f"♻️  Replasare BUY după SELL | Nivel {level_index} → rebuy la Nivel {rebuy_level} @ {rebuy_price}$")
+                self.place_buy_order(rebuy_price, rebuy_level)
+            else:
+                log.info(f"⏭️  Rebuy Nivel {rebuy_level} deja există — skip")
+
             return order
         except BinanceAPIException as e:
             log.error(f"❌ Eroare SELL: {e}")
@@ -423,13 +447,16 @@ class GridBot:
                 log.error(f"❌ Price WS eroare: {e}")
 
         def on_open(ws):
-            log.info(f"📡 Price WebSocket conectat — zero API weight!")
+            log.info(f"📡 Price WebSocket reconectat — prev_level resetat!")
+            with self.price_lock:
+                self.current_price = None  # forțăm așteptare preț nou
 
         def on_error(ws, error):
             log.error(f"❌ Price WS error: {error}")
 
         def on_close(ws, *args):
             log.warning("⚠️ Price WS închis — reconectez...")
+            self.prev_level = None  # reset la reconectare — evităm semnale false
 
         def run_ws():
             while True:
