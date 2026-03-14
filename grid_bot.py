@@ -40,17 +40,18 @@ LOWER_PRICE    = 70.0
 UPPER_PRICE    = 100.0
 GRID_LEVELS    = 10
 MIN_PROFIT_PCT = 0.2
+CHECK_INTERVAL = 5
 
-# Scaling: cumpărăm mai mult când prețul e mai jos
-# Cheia = nivel grid, Valoarea = cantitate SOL
-# Nivelele mai înalte (preț mare) = cantitate mică
-# Nivelele mai joase (preț mic)   = cantitate mare
-def get_order_amount(level_index, grid_levels):
+# ─── Compound settings ───────────────────────────────────────
+COMPOUND_RATIO    = 0.5    # 50% din profit se reinvestește
+MAX_CAPITAL       = 500.0  # plafon maxim — peste asta profitul e al tău
+INITIAL_MIN_QTY   = 0.2    # cantitate minimă inițială
+INITIAL_MAX_QTY   = 0.6    # cantitate maximă inițială
+
+def get_order_amount(level_index, grid_levels, max_qty=None, min_qty=None):
     """Returnează cantitatea pentru un nivel — scaling invers față de preț."""
-    # nivel 0 (cel mai jos) → cantitate maximă
-    # nivel N (cel mai sus) → cantitate minimă
-    min_qty  = 0.1
-    max_qty  = 0.5
+    if max_qty is None: max_qty = INITIAL_MAX_QTY
+    if min_qty is None: min_qty = INITIAL_MIN_QTY
     step_qty = (max_qty - min_qty) / max(grid_levels - 1, 1)
     qty = max_qty - level_index * step_qty
     return round(max(qty, min_qty), 1)
@@ -219,15 +220,20 @@ class GridBot:
         self.current_price = None
         self.price_lock    = threading.Lock()
 
-        self.profit_total  = 0.0
-        self.trades_buy    = 0
-        self.trades_sell   = 0
-        self.sells_blocked = 0
-        self.start_time    = datetime.now()
-        self.start_price   = None
-        self.prev_level    = None
+        self.profit_total    = 0.0
+        self.profit_withdrawn = 0.0  # profit retras (peste plafon)
+        self.trades_buy      = 0
+        self.trades_sell     = 0
+        self.sells_blocked   = 0
+        self.start_time      = datetime.now()
+        self.start_price     = None
+        self.prev_level      = None
         self.last_pending_check    = time.time()
         self.last_dashboard_check = time.time()
+
+        # Compound — cantitățile curente (se actualizează după fiecare SELL)
+        self.current_min_qty = INITIAL_MIN_QTY
+        self.current_max_qty = INITIAL_MAX_QTY
 
         step = (UPPER_PRICE - LOWER_PRICE) / GRID_LEVELS
         log.info(f"💎 Simbol: {SYMBOL} | Interval grid: {step:.1f}$ | Nivele: {GRID_LEVELS}")
@@ -260,7 +266,7 @@ class GridBot:
                 log.error(f"❌ Eroare verificare ordin {order_id}: {e}")
 
     def place_buy_order(self, price, level_index):
-        qty     = round_qty(get_order_amount(level_index, GRID_LEVELS), self.qty_dec)
+        qty     = round_qty(get_order_amount(level_index, GRID_LEVELS, self.current_max_qty, self.current_min_qty), self.qty_dec)
         price_r = round_price(price, self.price_dec)
         try:
             order    = self.client.create_order(symbol=SYMBOL, side="BUY", type="LIMIT",
@@ -323,6 +329,25 @@ class GridBot:
                 del self.position_quantities[level_index]
             log.info(f"🔴 SELL LIMIT | Nivel {level_index} | {sell_price_r}$ | Profit: +{profit_usdc:.4f} USDC | ID: {order_id}")
 
+            # ── Compound logic ──────────────────────────────────────────
+            usdc, _ = self.get_balance()
+            total_capital = usdc + sum(
+                self.position_quantities.get(l, 0.1) * self.grid_prices[l]
+                for l in self.positions if l not in self.pending_orders
+            )
+
+            if total_capital < MAX_CAPITAL:
+                # Reinvestește 50% din profit → mărește cantitățile
+                reinvest = profit_usdc * COMPOUND_RATIO
+                new_max = self.current_max_qty + reinvest / (UPPER_PRICE * GRID_LEVELS) * GRID_LEVELS
+                new_max = round(min(new_max, 2.0), 2)  # cap la 2.0 SOL per nivel
+                self.current_max_qty = new_max
+                self.current_min_qty = round(new_max * (INITIAL_MIN_QTY / INITIAL_MAX_QTY), 2)
+                log.info(f"📈 Compound: reinvestit {reinvest:.4f} USDC | Max qty: {self.current_max_qty} SOL")
+            else:
+                self.profit_withdrawn += profit_usdc
+                log.info(f"💸 Capital maxim atins ({total_capital:.1f}$ ≥ {MAX_CAPITAL}$) — profit {profit_usdc:.4f} USDC retras!")
+
             # Plasează BUY la nivel mai jos (strategie graduală)
             rebuy_level = self.get_rebuy_level(level_index)
             rebuy_price = self.grid_prices[rebuy_level]
@@ -373,6 +398,8 @@ class GridBot:
         print(f"  💰  Valoare totală    : {total_value:.2f} $")
         print("─" * 62)
         print(f"  ✅  Profit realizat   : +{self.profit_total:.4f} USDC")
+        print(f"  💸  Profit retras     : +{self.profit_withdrawn:.4f} USDC")
+        print(f"  📈  Qty curent        : {self.current_min_qty}-{self.current_max_qty} SOL/nivel")
         print(f"  🟢  Cumpărări         : {self.trades_buy}")
         print(f"  🔴  Vânzări reușite   : {self.trades_sell}")
         print(f"  🚫  Vânzări blocate   : {self.sells_blocked}")
