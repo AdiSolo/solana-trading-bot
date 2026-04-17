@@ -418,8 +418,8 @@ class GridBot:
 
         now = time.time()
 
-        # Verificare pending la fiecare 20 minute
-        if now - self.last_pending_check >= 1200 and self.pending_orders:
+        # Verificare pending la fiecare 60 minute
+        if now - self.last_pending_check >= 3600 and self.pending_orders:
             self.check_pending_orders()
             self.last_pending_check = now
 
