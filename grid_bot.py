@@ -5,7 +5,7 @@ Binance Grid Trading Bot — SOLUSDC
 - WebSocket User Data Stream pentru statusul ordinelor (instantan!)
 - ListenKey reînnoit automat la 30 minute
 - SELL permis DOAR dacă BUY e confirmat filled
-- Pozițiile sunt salvate în Supabase
+- Pozițiile sunt salvate în Supabasee
 """
 
 import time
